@@ -10,6 +10,7 @@ import os
 from datetime import timedelta
 import plotly.express as px
 import hashlib
+import gc
 
 # Set page config with light theme (Relative path for icon)
 st.set_page_config(page_title="CashTeam Dashboard", layout="wide", page_icon="unnamed.png")
@@ -244,6 +245,7 @@ def load_local_processing(uploaded_files):
     dfs = [pd.read_csv(f) for f in uploaded_files]
     return pd.concat(dfs, ignore_index=True)
 
+@st.cache_data(ttl=600)
 def process_sales_data(df):
     """Apply transformations (Time, Machine ID lookup) to the loaded DF."""
     if df.empty:
@@ -292,6 +294,7 @@ uploaded_files = st.sidebar.file_uploader("Upload New Sales CSVs", type="csv", a
 
 sales_df = sync_data_with_drive(uploaded_files)
 sales_df = process_sales_data(sales_df)
+gc.collect() # Free up memory after processing
 
 if not sales_df.empty:
     cim_df = get_google_sheet_data("CIM")
@@ -536,7 +539,13 @@ if not sales_df.empty:
 
     with tab5:
         st.subheader("Raw Data (Transformed)")
-        st.dataframe(filtered_df, width="stretch")
+        # Truncate view to prevent websocket crashes
+        MAX_ROWS = 1000
+        if len(filtered_df) > MAX_ROWS:
+            st.warning(f"⚠️ Displaying only the first {MAX_ROWS} rows (of {len(filtered_df)}) to prevent browser crash. Data is fully loaded.")
+            st.dataframe(filtered_df.head(MAX_ROWS), width="stretch")
+        else:
+            st.dataframe(filtered_df, width="stretch")
 
     st.divider()
     st.info("💡 **Persistence Active**: Data is automatically saved to and loaded from your Google Drive folder 'CashTeam Data'.")
