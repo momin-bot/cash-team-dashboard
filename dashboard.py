@@ -4,6 +4,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
+from googleapiclient.errors import HttpError
 import io
 import os
 from datetime import timedelta
@@ -21,7 +22,7 @@ SPREADSHEET_ID = "1hJVuerNSCLtWhECv7q1yFT0IRjsX853lqvJ3ryCjXbk"
 DRIVE_FOLDER_NAME = "CashTeamData" # Folder to look for in Drive
 MASTER_CSV_NAME = "nonce_sales_master.csv"
 
-# --- Credentials ---
+# --- Credentials & Drive Service ---
 def get_credentials():
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -33,39 +34,61 @@ def get_credentials():
         return Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
     return None
 
+@st.cache_resource
+def get_drive_service():
+    """Get cached Drive service."""
+    creds = get_credentials()
+    if not creds: return None
+    return build('drive', 'v3', credentials=creds)
+
+@st.cache_data(ttl=3600)
+def find_drive_folder_id(folder_name):
+    """Cached lookup for folder ID."""
+    service = get_drive_service()
+    if not service: return None
+    query = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
+    try:
+        results = service.files().list(q=query, fields="files(id, name)").execute()
+        files = results.get('files', [])
+        return files[0]['id'] if files else None
+    except Exception as e:
+        st.error(f"Drive API Error: {e}")
+        return None
+
+@st.cache_data(ttl=600)
+def find_drive_file_id(file_name, parent_id=None):
+    """Cached lookup for file ID."""
+    service = get_drive_service()
+    if not service: return None
+    query = f"name='{file_name}' and trashed=false"
+    if parent_id:
+        query += f" and '{parent_id}' in parents"
+    try:
+        results = service.files().list(q=query, fields="files(id, name)").execute()
+        files = results.get('files', [])
+        return files[0]['id'] if files else None
+    except Exception as e:
+        return None
+
 # --- Drive Manager Class ---
 class DriveManager:
-    def __init__(self, creds):
-        self.service = build('drive', 'v3', credentials=creds)
+    def __init__(self):
+        self.service = get_drive_service()
     
-    def find_folder(self, folder_name):
-        """Find folder ID by name."""
-        query = f"mimeType='application/vnd.google-apps.folder' and name='{folder_name}' and trashed=false"
-        results = self.service.files().list(q=query, fields="files(id, name)").execute()
-        files = results.get('files', [])
-        if files:
-            return files[0]['id']
-        return None
-
-    def find_file(self, file_name, parent_id=None):
-        """Find file ID by name, optionally in a folder."""
-        query = f"name='{file_name}' and trashed=false"
-        if parent_id:
-            query += f" and '{parent_id}' in parents"
-        results = self.service.files().list(q=query, fields="files(id, name)").execute()
-        files = results.get('files', [])
-        if files:
-            return files[0]['id']
-        return None
-
     def download_csv(self, file_id):
         """Download CSV content as DataFrame."""
-        request = self.service.files().get_media(fileId=file_id)
-        file_content = io.BytesIO(request.execute())
-        return pd.read_csv(file_content)
+        if not self.service: return pd.DataFrame()
+        try:
+            request = self.service.files().get_media(fileId=file_id)
+            file_content = io.BytesIO(request.execute())
+            return pd.read_csv(file_content)
+        except Exception as e:
+            st.error(f"Error downloading file: {e}")
+            return pd.DataFrame()
 
     def upload_csv(self, df, file_name, folder_id):
         """Upload DataFrame as CSV to Drive (Overwrite or Create)."""
+        if not self.service: return
         try:
             csv_buffer = io.BytesIO()
             df.to_csv(csv_buffer, index=False)
@@ -75,7 +98,7 @@ class DriveManager:
             media = MediaIoBaseUpload(csv_buffer, mimetype='text/csv', resumable=True)
             
             # Check if exists to update or create
-            existing_id = self.find_file(file_name, folder_id)
+            existing_id = find_drive_file_id(file_name, folder_id) # Use cached lookup
             
             if existing_id:
                 # Update existing
@@ -90,10 +113,20 @@ class DriveManager:
                     media_body=media,
                     fields='id'
                 ).execute()
+        except HttpError as e:
+            if "storageQuotaExceeded" in str(e) or "Service Accounts do not have storage quota" in str(e):
+                st.error("❌ **Storage Quota Error**: Service Accounts cannot own files in personal Drives.")
+                st.warning(
+                    f"⚠️ **Action Required**: Please manually create an empty file named `{file_name}` "
+                    f"inside the `{DRIVE_FOLDER_NAME}` folder on Google Drive. "
+                    "Once created, the app will update it instead of trying to create a new one."
+                )
+            else:
+                 st.error(f"❌ Upload Failed! API Error: {e}")
+            raise e
         except Exception as e:
             st.error(f"❌ Upload Failed! Error: {e}")
             st.info("💡 Tip: Check if the Service Account has **Editor** access to the 'CashTeamData' folder in Google Drive.")
-            # If we have detailed error content, show it
             if hasattr(e, 'content'):
                 st.code(e.content.decode('utf-8'))
             raise e
@@ -120,9 +153,8 @@ def get_google_sheet_data(sheet_name):
 
 @st.cache_data(ttl=600)
 def get_cached_master_csv(file_id):
-    """Cached download of the master CSV to avoid re-downloading on every click."""
-    creds = get_credentials()
-    drive = DriveManager(creds)
+    """Cached download of the master CSV."""
+    drive = DriveManager()
     return drive.download_csv(file_id)
 
 def sync_data_with_drive(uploaded_files):
@@ -133,21 +165,16 @@ def sync_data_with_drive(uploaded_files):
     4. Uploads updated Master CSV back to Drive.
     Returns the unified DataFrame.
     """
-    creds = get_credentials()
-    if not creds:
-        st.error("Missing Credentials")
-        return pd.DataFrame()
-    
-    drive = DriveManager(creds)
-    
-    # 1. Find/Create Folder
-    folder_id = drive.find_folder(DRIVE_FOLDER_NAME)
+    # 1. Find/Create Folder (Cached)
+    folder_id = find_drive_folder_id(DRIVE_FOLDER_NAME)
     if not folder_id:
         st.warning(f"Folder '{DRIVE_FOLDER_NAME}' not found in Drive. Please create it and share with the service account.")
         return load_local_processing(uploaded_files)
 
+    drive_manager = DriveManager() # Initialize once
+
     # 2. Load Master Master from Drive (Cached)
-    master_id = drive.find_file(MASTER_CSV_NAME, folder_id)
+    master_id = find_drive_file_id(MASTER_CSV_NAME, folder_id)
     if master_id:
         with st.spinner("Loading Database..."):
             master_df = get_cached_master_csv(master_id)
@@ -179,9 +206,10 @@ def sync_data_with_drive(uploaded_files):
         # If we have new uploads, Sync back to Drive AND Clear Cache
         if uploaded_files: 
             with st.spinner("Syncing updated database to Google Drive..."):
-                drive.upload_csv(combined_df, MASTER_CSV_NAME, folder_id)
+                drive_manager.upload_csv(combined_df, MASTER_CSV_NAME, folder_id)
                 # IMPORTANT: Clear cache so next reload gets the updated file
                 get_cached_master_csv.clear()
+                find_drive_file_id.clear() # Clear file lookup cache just in case we created it involved
                 st.sidebar.success(f"✅ Database Updated! Total Records: {len(combined_df)}")
     
     return combined_df
