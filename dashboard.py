@@ -118,6 +118,13 @@ def get_google_sheet_data(sheet_name):
         st.error(f"Error fetching sheet '{sheet_name}': {e}")
         return pd.DataFrame()
 
+@st.cache_data(ttl=600)
+def get_cached_master_csv(file_id):
+    """Cached download of the master CSV to avoid re-downloading on every click."""
+    creds = get_credentials()
+    drive = DriveManager(creds)
+    return drive.download_csv(file_id)
+
 def sync_data_with_drive(uploaded_files):
     """
     1. Downloads Master CSV from Drive.
@@ -137,14 +144,13 @@ def sync_data_with_drive(uploaded_files):
     folder_id = drive.find_folder(DRIVE_FOLDER_NAME)
     if not folder_id:
         st.warning(f"Folder '{DRIVE_FOLDER_NAME}' not found in Drive. Please create it and share with the service account.")
-        # Fallback: Just return uploaded data if no folder
         return load_local_processing(uploaded_files)
 
-    # 2. Load Master Master from Drive
+    # 2. Load Master Master from Drive (Cached)
     master_id = drive.find_file(MASTER_CSV_NAME, folder_id)
     if master_id:
-        with st.spinner("Downloading Master Database from Drive..."):
-            master_df = drive.download_csv(master_id)
+        with st.spinner("Loading Database..."):
+            master_df = get_cached_master_csv(master_id)
     else:
         master_df = pd.DataFrame()
 
@@ -168,19 +174,14 @@ def sync_data_with_drive(uploaded_files):
 
     # 4. Deduplicate (Logic: 'id' is unique key)
     if 'id' in combined_df.columns:
-        before = len(combined_df)
-        combined_df = combined_df.drop_duplicates(subset=['id'], keep='first') # Keep existing (first) or new? keeping first usually safer for history
-        after = len(combined_df)
+        combined_df = combined_df.drop_duplicates(subset=['id'], keep='first')
         
-        # If new data was added, Upload back to Drive
-        if new_data and (after > len(master_df) or (len(master_df) == 0 and not master_df.empty)): 
-             # Simplest check: just upload if we have new files. 
-             # Efficient check: only if rows increased or it's a fresh file.
-             pass 
-        
-        if uploaded_files: # Always sync back if user uploaded something, to be safe
+        # If we have new uploads, Sync back to Drive AND Clear Cache
+        if uploaded_files: 
             with st.spinner("Syncing updated database to Google Drive..."):
                 drive.upload_csv(combined_df, MASTER_CSV_NAME, folder_id)
+                # IMPORTANT: Clear cache so next reload gets the updated file
+                get_cached_master_csv.clear()
                 st.sidebar.success(f"✅ Database Updated! Total Records: {len(combined_df)}")
     
     return combined_df
@@ -221,6 +222,14 @@ def process_sales_data(df):
 
 # Sidebar: File Uploader
 st.sidebar.header("Data Connection")
+
+if st.sidebar.button("🔄 Refresh Data"):
+    # Clear caches
+    get_google_sheet_data.clear()
+    get_cached_master_csv.clear()
+    st.cache_data.clear() # Clear all data caches to be safe
+    st.rerun()
+
 st.sidebar.info("📂 **Storage**: Google Drive (Smart Append)")
 
 uploaded_files = st.sidebar.file_uploader("Upload New Sales CSVs", type="csv", accept_multiple_files=True)
