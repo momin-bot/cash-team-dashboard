@@ -12,16 +12,8 @@ import plotly.express as px
 # Set page config with light theme (Relative path for icon)
 st.set_page_config(page_title="CashTeam Dashboard", layout="wide", page_icon="unnamed.png")
 
-# Header with logo and title
-col_logo, col_title = st.columns([1, 8])
-with col_logo:
-    # Use relative path for logo, with fallback
-    if os.path.exists("unnamed.png"):
-        st.image("unnamed.png", width=80)
-    else:
-        st.write("🖼️") # Emoji fallback if image missing
-with col_title:
-    st.title("CashTeam Dashboard")
+# Header
+st.title("CashTeam Dashboard")
 
 # --- Constants & Config ---
 CREDENTIALS_FILE = 'credentials.json'
@@ -74,29 +66,37 @@ class DriveManager:
 
     def upload_csv(self, df, file_name, folder_id):
         """Upload DataFrame as CSV to Drive (Overwrite or Create)."""
-        csv_buffer = io.BytesIO()
-        df.to_csv(csv_buffer, index=False)
-        csv_buffer.seek(0)
-        
-        file_metadata = {'name': file_name, 'parents': [folder_id]}
-        media = MediaIoBaseUpload(csv_buffer, mimetype='text/csv', resumable=True)
-        
-        # Check if exists to update or create
-        existing_id = self.find_file(file_name, folder_id)
-        
-        if existing_id:
-            # Update existing
-            self.service.files().update(
-                fileId=existing_id,
-                media_body=media
-            ).execute()
-        else:
-            # Create new
-            self.service.files().create(
-                body=file_metadata,
-                media_body=media,
-                fields='id'
-            ).execute()
+        try:
+            csv_buffer = io.BytesIO()
+            df.to_csv(csv_buffer, index=False)
+            csv_buffer.seek(0) # IMPORTANT: Reset buffer position
+            
+            file_metadata = {'name': file_name, 'parents': [folder_id]}
+            media = MediaIoBaseUpload(csv_buffer, mimetype='text/csv', resumable=True)
+            
+            # Check if exists to update or create
+            existing_id = self.find_file(file_name, folder_id)
+            
+            if existing_id:
+                # Update existing
+                self.service.files().update(
+                    fileId=existing_id,
+                    media_body=media
+                ).execute()
+            else:
+                # Create new
+                self.service.files().create(
+                    body=file_metadata,
+                    media_body=media,
+                    fields='id'
+                ).execute()
+        except Exception as e:
+            st.error(f"❌ Upload Failed! Error: {e}")
+            st.info("💡 Tip: Check if the Service Account has **Editor** access to the 'CashTeamData' folder in Google Drive.")
+            # If we have detailed error content, show it
+            if hasattr(e, 'content'):
+                st.code(e.content.decode('utf-8'))
+            raise e
 
 # --- Functions ---
 
