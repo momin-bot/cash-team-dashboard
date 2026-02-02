@@ -377,7 +377,7 @@ if not sales_df.empty:
         if 'Date' in filtered_df.columns and 'Sales_Type' in filtered_df.columns and 'fiat' in filtered_df.columns:
             trend_df = filtered_df.groupby(['Date', 'Sales_Type'])['fiat'].sum().reset_index(name='Amount')
             fig = px.line(trend_df, x='Date', y='Amount', color='Sales_Type', markers=True, title="Daily Sales Amount by Type")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
     with tab2:
         st.subheader("Sales by State")
@@ -409,10 +409,10 @@ if not sales_df.empty:
                 # Bar chart
                 fig_state = px.bar(state_sales, x='State', y='Total Sales', title="Sales by State", 
                                   color='Total Sales', color_continuous_scale='Blues')
-                st.plotly_chart(fig_state, use_container_width=True)
+                st.plotly_chart(fig_state, width="stretch")
                 
                 # Show table
-                st.dataframe(state_sales, use_container_width=True)
+                st.dataframe(state_sales, width="stretch")
             else:
                 st.warning(f"Could not find MachineID or State columns in machines sheet.")
         else:
@@ -484,7 +484,7 @@ if not sales_df.empty:
                 fig_compare = px.line(melted, x='Date', y='Amount', color='Type', markers=True, 
                                       title="Daily Sales vs Deposits vs Forecast",
                                       color_discrete_map={'Sales': '#1f77b4', 'Deposits': '#2ca02c', 'Forecast': '#ff8c00'})
-                st.plotly_chart(fig_compare, use_container_width=True)
+                st.plotly_chart(fig_compare, width="stretch")
             else:
                 st.warning("Could not find 'Date' or 'Total' columns in deposits sheet.")
         else:
@@ -505,7 +505,7 @@ if not sales_df.empty:
                 state_summary = state_summary[state_summary['Total Cash'] > 0].sort_values('Total Cash', ascending=False)
                 
                 fig_cim = px.bar(state_summary, x='State', y='Total Cash', title="Cash Balance by State", color='Total Cash', color_continuous_scale='Greens')
-                st.plotly_chart(fig_cim, use_container_width=True)
+                st.plotly_chart(fig_cim, width="stretch")
             else:
                 st.warning(f"Could not find State or Balance columns.")
         else:
@@ -513,7 +513,7 @@ if not sales_df.empty:
 
     with tab5:
         st.subheader("Raw Data (Transformed)")
-        st.dataframe(filtered_df, use_container_width=True)
+        st.dataframe(filtered_df, width="stretch")
 
     st.divider()
     st.info("💡 **Persistence Active**: Data is automatically saved to and loaded from your Google Drive folder 'CashTeam Data'.")
