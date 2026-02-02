@@ -9,6 +9,7 @@ import io
 import os
 from datetime import timedelta
 import plotly.express as px
+import hashlib
 
 # Set page config with light theme (Relative path for icon)
 st.set_page_config(page_title="CashTeam Dashboard", layout="wide", page_icon="unnamed.png")
@@ -181,38 +182,60 @@ def sync_data_with_drive(uploaded_files):
     else:
         master_df = pd.DataFrame()
 
-    # 3. Load & Append New Files
-    new_data = []
+    # 3. Load & Append New Files - ONLY if not already processed
+    # Generate hash of uploaded files to track state
+    current_upload_hash = ""
     if uploaded_files:
+        # Create a signature based on file names and sizes
+        files_sig = sorted([(f.name, f.size) for f in uploaded_files])
+        current_upload_hash = hashlib.md5(str(files_sig).encode()).hexdigest()
+
+    # Check if we already processed this exact batch of uploads
+    if 'processed_upload_hash' not in st.session_state:
+        st.session_state.processed_upload_hash = ""
+        
+    is_new_upload = (uploaded_files and current_upload_hash != st.session_state.processed_upload_hash)
+
+    new_data = []
+    # Only process uploads if they are NEW or changed
+    if is_new_upload:
         for f in uploaded_files:
             try:
+                # Reset pointer just in case
+                f.seek(0)
                 new_data.append(pd.read_csv(f))
             except Exception as e:
                 st.error(f"Error reading {f.name}: {e}")
     
     if new_data:
         new_df = pd.concat(new_data, ignore_index=True)
+        # Combine with Master
         combined_df = pd.concat([master_df, new_df], ignore_index=True)
-    else:
-        combined_df = master_df
-
-    if combined_df.empty:
-        return pd.DataFrame()
-
-    # 4. Deduplicate (Logic: 'id' is unique key)
-    if 'id' in combined_df.columns:
-        combined_df = combined_df.drop_duplicates(subset=['id'], keep='first')
         
-        # If we have new uploads, Sync back to Drive AND Clear Cache
-        if uploaded_files: 
-            with st.spinner("Syncing updated database to Google Drive..."):
-                drive_manager.upload_csv(combined_df, MASTER_CSV_NAME, folder_id)
-                # IMPORTANT: Clear cache so next reload gets the updated file
-                get_cached_master_csv.clear()
-                find_drive_file_id.clear() # Clear file lookup cache just in case we created it involved
-                st.sidebar.success(f"✅ Database Updated! Total Records: {len(combined_df)}")
-    
-    return combined_df
+        # Deduplicate
+        if 'id' in combined_df.columns:
+            combined_df = combined_df.drop_duplicates(subset=['id'], keep='first')
+        
+        # Sync back to Drive
+        with st.spinner("Syncing updated database to Google Drive..."):
+            drive_manager.upload_csv(combined_df, MASTER_CSV_NAME, folder_id)
+            
+            # Update Session State so we don't do this again for these files
+            st.session_state.processed_upload_hash = current_upload_hash
+            
+            # IMPORTANT: Clear cache so next reload gets the updated file
+            get_cached_master_csv.clear()
+            find_drive_file_id.clear() 
+            st.sidebar.success(f"✅ Database Updated! Total Records: {len(combined_df)}")
+            
+        return combined_df
+    else:
+        # No new uploads to process, just return the loaded Master
+        # (Which should be up to date if we cleared cache previously)
+        if uploaded_files and current_upload_hash == st.session_state.processed_upload_hash:
+             st.sidebar.success(f"✅ Database Up-to-Date (Cached). Total Records: {len(master_df)}")
+        
+        return master_df
 
 def load_local_processing(uploaded_files):
     """Fallback if no Drive connection"""
